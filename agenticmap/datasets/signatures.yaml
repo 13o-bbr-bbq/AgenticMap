@@ -1,0 +1,13 @@
+# AgenticMap attack signatures
+# Format inherited from promptmap (https://github.com/8vana/promptmap), with ATLAS tags.
+#
+# Each entry:
+#   id: stable kebab-case identifier
+#   name: human-readable label
+#   category: prompt-injection | jailbreak | indirect-injection | tool-abuse | multi-agent
+#   atlas: list of MITRE ATLAS tactic/technique IDs
+#   severity: info | low | medium | high | critical
+#   prompts: list of probe payloads
+#   success_criteria: how Scorer/Verifier judges a successful exploitation
+
+signatures: []
