@@ -1,31 +1,37 @@
 # AgentCore + Bedrock Agents static check catalog.
 #
-# Schema (each entry):
-#   id:           stable kebab/SCREAMING-KEBAB identifier
-#   title:        one-line human-readable
-#   category:     guardrail | hitl | iam | memory | gateway | identity |
-#                 policy | network | observability | prompt-override |
-#                 knowledge-base
 # Scope (2026-05): GA AgentCore components only — Runtime / Memory /
 # Gateway / Identity / Policy / Browser / Code Interpreter / Observability,
-# plus legacy Bedrock Agents. Evaluations / Payments / Registry and any
-# preview features are out of scope for v0.1.
-#   severity:     info | low | medium | high | critical
-#   description:  multi-line rationale
-#   client:       boto3 client name (e.g. bedrock-agent, bedrock-agentcore-control)
-#   operation:    AWS API operation (PascalCase)
-#   field:        dotted JSON path within the operation response
-#   condition:    natural-language predicate; the check module evaluates it
-#   atlas:        list of MITRE ATLAS technique names (IDs filled in at module level)
-#   compliance:   list of framework tags; expanded by compliance/*.yaml
-#   remediation:  short hint (machine-readable rules belong in v0.2 remediator)
+# plus legacy Bedrock Agents (Action Groups, Knowledge Bases, Guardrails,
+# Prompt Override). Evaluations / Payments / Registry and any preview
+# features are out of scope for v0.1.
 #
-# NOTE: AgentCore is new in 2025-2026 — some API operation / field names
-# below are best-effort and MUST be verified against current AWS docs before
-# the corresponding check module is implemented. Marked with `verify: true`
-# where uncertain.
+# Schema (each entry):
+#   id:              stable SCREAMING-KEBAB identifier
+#   title:           one-line human-readable
+#   category:        guardrail | hitl | iam | memory | runtime | gateway |
+#                    identity | policy | browser | code-interpreter |
+#                    network | observability | prompt-override |
+#                    knowledge-base | multi-agent
+#   severity:        info | low | medium | high | critical
+#   description:     multi-line rationale
+#   client:          boto3 client name (bedrock-agent, bedrock-agentcore-control,
+#                    bedrock, iam, s3, ec2, cloudtrail, logs)
+#   operation:       AWS API operation (boto3 snake_case or AWS PascalCase)
+#   field:           dotted JSON path within the operation response
+#   condition:       natural-language predicate; the check module evaluates it
+#   boto3_verified:  true if the field path was confirmed against boto3 docs
+#                    as of 2026-05; false if the field name still needs
+#                    primary-source verification
+#   atlas:           list of MITRE ATLAS technique names (IDs resolved at
+#                    module level via compliance/mitre_atlas.yaml)
+#   compliance:      list of framework tags; expanded by compliance/*.yaml
+#   remediation:     short hint (machine-readable rules belong in v0.2 remediator)
+#   extra_logic:     optional note describing analysis beyond a simple field
+#                    comparison (e.g. "requires Cedar parser", "requires IAM
+#                    policy JSON traversal")
 
-version: 0.1
+version: 0.2
 
 checks:
 
@@ -39,9 +45,10 @@ checks:
       model's safety training. Denied topics, PII filtering, and prompt-attack
       detection are not enforced.
     client: bedrock-agent
-    operation: GetAgent
+    operation: get_agent
     field: agent.guardrailConfiguration.guardrailIdentifier
     condition: must be a non-empty string
+    boto3_verified: true
     atlas: [LLM-Prompt-Injection, LLM-Jailbreak]
     compliance:
       - meti:統制リスク管理
@@ -63,9 +70,10 @@ checks:
       jailbreak attempts. Without it, Guardrail provides no LLM-specific
       adversarial-input defense.
     client: bedrock
-    operation: GetGuardrail
+    operation: get_guardrail
     field: contentPolicy.filters[?type=='PROMPT_ATTACK'].inputStrength
     condition: must be HIGH (or MEDIUM with explicit risk acceptance)
+    boto3_verified: true
     atlas: [LLM-Prompt-Injection, LLM-Jailbreak]
     compliance:
       - meti:統制リスク管理
@@ -78,11 +86,14 @@ checks:
     severity: high
     description: |
       PII anonymization or blocking is required when the agent may surface
-      personal data from Knowledge Bases or tool outputs.
+      personal data from Knowledge Bases, Memory, or tool outputs. Note: PII
+      handling lives on the Guardrail side; AgentCore Memory itself does not
+      expose a PII-masking field.
     client: bedrock
-    operation: GetGuardrail
+    operation: get_guardrail
     field: sensitiveInformationPolicy.piiEntities
     condition: must contain at least one entity with action ANONYMIZE or BLOCK
+    boto3_verified: true
     atlas: [Sensitive-Information-Disclosure]
     compliance:
       - jp-appi:第18条-3 # 個人関連情報の第三者提供
@@ -90,6 +101,29 @@ checks:
       - meti:プライバシー
       - eu-ai-act:Art.10
     remediation: Configure piiEntities for the personal-data classes the agent handles.
+
+  - id: AGENTCORE-GUARDRAIL-004
+    title: No Enforced Guardrail Configuration at account level
+    category: guardrail
+    severity: medium
+    description: |
+      The account-level "enforced guardrail configuration" guarantees that
+      all model invocations apply at least the baseline Guardrail, regardless
+      of per-agent configuration. Without it, a newly-created agent without
+      a Guardrail attached has no defense in depth.
+    client: bedrock
+    operation: list_enforced_guardrails_configuration
+    field: enforcedGuardrailConfigurations[*]
+    condition: at least one enforced configuration must exist for the account / region
+    boto3_verified: true
+    atlas: [LLM-Prompt-Injection]
+    compliance:
+      - meti:統制リスク管理
+      - nist-ai-rmf:MANAGE-1.3
+      - iso-42001:6.2.1
+    remediation: |
+      Use put_enforced_guardrail_configuration to bind a baseline Guardrail
+      that applies even when individual agents omit their own.
 
   # ─── HITL (Human-in-the-Loop) ────────────────────────────────────────────
   - id: AGENTCORE-HITL-001
@@ -102,11 +136,15 @@ checks:
       invocation. Bedrock Agents support `requireConfirmation` per Action
       Group function.
     client: bedrock-agent
-    operation: GetAgentActionGroup
+    operation: get_agent_action_group
     field: agentActionGroup.functionSchema.functions[*].requireConfirmation
     condition: |
       must be ENABLED for any function whose name/description matches
       high-impact pattern (write, delete, execute, transfer, send, pay)
+    boto3_verified: true
+    extra_logic: |
+      Pattern-match function names/descriptions to determine the "high-impact"
+      set. Configurable via org policy.
     atlas: [Unsafe-Autonomy]
     compliance:
       - meti:人間の関与
@@ -118,40 +156,29 @@ checks:
       Set requireConfirmation=ENABLED on the function. For full automation
       flows, document the risk-acceptance and link to a compensating control.
 
-  - id: AGENTCORE-HITL-002
-    title: AgentCore Code Interpreter executes without approval
-    category: hitl
-    severity: high
-    description: |
-      Code Interpreter runs arbitrary code. Without an approval / sandbox
-      egress restriction, indirect PI can escalate into remote code execution.
-    client: bedrock-agentcore-control
-    operation: GetCodeInterpreter
-    field: codeInterpreter.executionPolicy
-    condition: must require approval OR run inside an egress-restricted sandbox
-    atlas: [Unsafe-Autonomy, Tool-Abuse]
-    compliance:
-      - meti:人間の関与
-      - fsa:AI-DP-5
-    remediation: Enable approval workflow or constrain network egress to deny-by-default.
-    verify: true
-
-  # ─── IAM (Action Group execution role) ───────────────────────────────────
+  # ─── IAM ─────────────────────────────────────────────────────────────────
   - id: AGENTCORE-IAM-001
     title: Action Group Lambda execution role is over-privileged
     category: iam
     severity: high
     description: |
       The Lambda backing an Action Group inherits the role passed in
-      ActionGroupExecutor. If that role contains `*:*`, AdministratorAccess,
+      actionGroupExecutor. If that role contains `*:*`, AdministratorAccess,
       or PowerUserAccess, a successful tool abuse compromises the entire
       account.
     client: iam
-    operation: GetRolePolicy / ListAttachedRolePolicies
-    field: policies[*].PolicyDocument.Statement[*]
+    operation: list_attached_role_policies / get_role_policy
+    field: PolicyDocument.Statement[*]
     condition: |
       must not contain `Action: "*"` with `Resource: "*"`; must not be
       AdministratorAccess or PowerUserAccess managed policy
+    boto3_verified: true
+    extra_logic: |
+      Multi-step traversal:
+        get_agent_action_group → actionGroupExecutor.lambda ARN
+        → lambda:get_function → role ARN
+        → iam:list_attached_role_policies + list_role_policies
+        → traverse policy documents for wildcards.
     atlas: [Privilege-Escalation, Tool-Abuse]
     compliance:
       - meti:統制リスク管理
@@ -160,44 +187,25 @@ checks:
       - iso-42001:8.2
     remediation: Apply least privilege; scope to the specific AWS API set the tool requires.
 
-  - id: AGENTCORE-IAM-002
-    title: AgentCore workload identity scoped too broadly
-    category: iam
-    severity: medium
-    description: |
-      AgentCore Identity issues workload identities; if granted broad scopes
-      (e.g. `*` resource in the workload's policy), a compromised agent has
-      lateral movement potential.
-    client: bedrock-agentcore-control
-    operation: GetWorkloadIdentity
-    field: workloadIdentity.policy
-    condition: workload identity policy must not include wildcard resources
-    atlas: [Privilege-Escalation]
-    compliance:
-      - meti:統制リスク管理
-      - nist-ai-rmf:MANAGE-2.1
-    remediation: Scope workload identity to specific resources / actions used by the agent.
-    verify: true
-
   # ─── Memory ──────────────────────────────────────────────────────────────
   - id: AGENTCORE-MEMORY-001
-    title: AgentCore Memory has no TTL configured
+    title: AgentCore Memory has no event expiry configured
     category: memory
     severity: medium
     description: |
-      Long-term memory without TTL accumulates user data indefinitely,
+      Long-term memory without expiry accumulates user data indefinitely,
       increasing privacy risk and the blast radius of any breach.
     client: bedrock-agentcore-control
-    operation: GetMemory
-    field: memory.retentionDays
-    condition: must be set to a value ≤ org retention policy
+    operation: get_memory
+    field: eventExpiryDuration
+    condition: must be set to a value (days) ≤ org retention policy
+    boto3_verified: true
     atlas: [Sensitive-Information-Disclosure]
     compliance:
       - jp-appi:第22条 # 保有個人データの正確性確保 / 消去
       - meti:プライバシー
       - eu-ai-act:Art.10
-    remediation: Set retentionDays per data-classification policy (e.g. 30 / 90 / 365).
-    verify: true
+    remediation: Set eventExpiryDuration per data-classification policy (e.g. 30 / 90 / 365 days).
 
   - id: AGENTCORE-MEMORY-002
     title: AgentCore Memory not encrypted with customer-managed KMS key
@@ -207,92 +215,166 @@ checks:
       Default AWS-owned encryption is opaque to the customer. CMK enables
       audit, rotation, and revocation of access to memory contents.
     client: bedrock-agentcore-control
-    operation: GetMemory
-    field: memory.kmsKeyArn
-    condition: must be a customer-managed key ARN
+    operation: get_memory
+    field: encryptionKeyArn
+    condition: must be a customer-managed key ARN (not AWS-owned default)
+    boto3_verified: true
     atlas: [Sensitive-Information-Disclosure]
     compliance:
       - fsa:AI-DP-4
       - meti:統制リスク管理
       - iso-42001:8.3
     remediation: Pass a customer-managed KMS key ARN during memory creation.
-    verify: true
+
+  # ─── Runtime ─────────────────────────────────────────────────────────────
+  - id: AGENTCORE-RUNTIME-001
+    title: AgentCore Runtime has no inbound JWT authorizer configured
+    category: runtime
+    severity: high
+    description: |
+      Without authorizerConfiguration.customJWTAuthorizer, the Runtime
+      endpoint accepts unauthenticated callers (subject to IAM at the AWS
+      API level only). Per-user attribution and rate limiting are impossible.
+    client: bedrock-agentcore-control
+    operation: get_agent_runtime
+    field: authorizerConfiguration.customJWTAuthorizer
+    condition: |
+      must be present with non-empty discoveryUrl AND
+      (allowedAudience non-empty OR allowedClients non-empty)
+    boto3_verified: true
+    atlas: [Initial-Access]
+    compliance:
+      - jp-appi:第18条
+      - meti:統制リスク管理
+      - fsa:AI-DP-4
+      - nist-ai-rmf:MANAGE-2.1
+    remediation: |
+      Configure customJWTAuthorizer with the IdP's discoveryUrl plus
+      allowedAudience / allowedClients matching the agent's user base.
+
+  - id: AGENTCORE-RUNTIME-002
+    title: AgentCore Runtime uses PUBLIC networkMode for sensitive workload
+    category: runtime
+    severity: medium
+    description: |
+      networkMode=PUBLIC places the Runtime on the public internet path.
+      For workloads handling regulated or sensitive data, networkMode=VPC
+      with restricted security groups significantly reduces exposure.
+    client: bedrock-agentcore-control
+    operation: get_agent_runtime
+    field: networkConfiguration.networkMode
+    condition: |
+      must be VPC for any Runtime tagged sensitive / regulated; PUBLIC
+      acceptable only with documented risk acceptance
+    boto3_verified: true
+    atlas: [Initial-Access]
+    compliance:
+      - fsa:AI-DP-4
+      - meti:統制リスク管理
+    remediation: Set networkMode=VPC with appropriate securityGroups and subnets.
 
   # ─── Gateway ─────────────────────────────────────────────────────────────
   - id: AGENTCORE-GATEWAY-001
-    title: AgentCore Gateway allows anonymous access
+    title: AgentCore Gateway authorizerType is NONE (anonymous access)
     category: gateway
     severity: critical
     description: |
-      Gateway exposes tools (often via MCP) to the agent. Anonymous access
-      lets any external caller invoke them, bypassing the agent's intended
-      orchestration.
+      authorizerType=NONE lets any external caller invoke the Gateway's
+      tool targets, bypassing the agent's intended orchestration.
+      AUTHENTICATE_ONLY validates identity but performs no authorization —
+      also insufficient for write-capable tools.
     client: bedrock-agentcore-control
-    operation: GetGateway
-    field: gateway.authorizationType
-    condition: must be one of IAM | COGNITO | CUSTOM_JWT (not NONE)
+    operation: get_gateway
+    field: authorizerType
+    condition: must be CUSTOM_JWT or AWS_IAM (not NONE; AUTHENTICATE_ONLY only with policyEngineConfiguration)
+    boto3_verified: true
     atlas: [Tool-Abuse, Initial-Access]
     compliance:
       - meti:統制リスク管理
       - fsa:AI-DP-4
       - nist-ai-rmf:MANAGE-2.1
-    remediation: Configure Cognito user pool or IAM auth on the Gateway.
-    verify: true
+    remediation: |
+      Configure customJWTAuthorizer or set authorizerType=AWS_IAM with a
+      resource policy restricting principals.
 
   - id: AGENTCORE-GATEWAY-002
-    title: AgentCore Gateway exposes broad set of tools to a single agent
+    title: AgentCore Gateway exposes broad set of tool targets to one agent
     category: gateway
     severity: medium
     description: |
       An agent connected to a Gateway with many tool targets has a wider
       blast radius from tool-abuse exploits. Group tools by least-need.
     client: bedrock-agentcore-control
-    operation: ListGatewayTargets
-    field: gatewayTargets[*]
-    condition: tools-per-agent count should be ≤ org policy (default 10)
+    operation: list_gateway_targets
+    field: items[*]
+    condition: tool-target count per Gateway should be ≤ org policy (default 10)
+    boto3_verified: true
     atlas: [Tool-Abuse]
     compliance:
       - meti:統制リスク管理
     remediation: Split Gateways per agent role; remove unused tool targets.
-    verify: true
+
+  - id: AGENTCORE-GATEWAY-003
+    title: AgentCore Gateway exceptionLevel set to DEBUG
+    category: gateway
+    severity: medium
+    description: |
+      exceptionLevel=DEBUG returns granular error messages to callers. In
+      production this leaks internal structure (tool names, schemas, stack
+      traces) that aid reconnaissance.
+    client: bedrock-agentcore-control
+    operation: get_gateway
+    field: exceptionLevel
+    condition: must be omitted (generic messages) in production
+    boto3_verified: true
+    atlas: [Reconnaissance]
+    compliance:
+      - meti:統制リスク管理
+      - iso-42001:8.2
+    remediation: Remove exceptionLevel or set non-DEBUG before going to production.
 
   # ─── Identity ────────────────────────────────────────────────────────────
   - id: AGENTCORE-IDENTITY-001
-    title: Inbound OAuth provider not configured for human-facing agent
+    title: Workload Identity allows wildcard or overly broad OAuth2 return URLs
     category: identity
     severity: medium
     description: |
-      Agents exposed to end users should authenticate the human via OAuth /
-      Cognito so that agent actions can be attributed and rate-limited per
-      user.
+      Workload Identity's allowedResourceOauth2ReturnUrls controls where
+      OAuth2 callbacks can redirect. Wildcards or attacker-controllable
+      domains enable an open-redirect / token-interception class of attack.
+      Note: get_workload_identity does not expose a "policy" field —
+      permission scoping for the agent is enforced via the Runtime / Gateway
+      roleArn, not via the workload identity itself.
     client: bedrock-agentcore-control
-    operation: GetAgentRuntime
-    field: agentRuntime.inboundAuth
-    condition: must be configured for any agent with public ingress
+    operation: get_workload_identity
+    field: allowedResourceOauth2ReturnUrls
+    condition: |
+      must not contain `*`, raw IP addresses, or domains outside the
+      organization's controlled set
+    boto3_verified: true
     atlas: [Initial-Access]
     compliance:
-      - jp-appi:第18条
       - meti:統制リスク管理
-      - fsa:AI-DP-4
-    remediation: Configure a Cognito user pool / OAuth IdP on the AgentCore Runtime.
-    verify: true
+      - nist-ai-rmf:MANAGE-2.1
+    remediation: Restrict allowedResourceOauth2ReturnUrls to specific HTTPS callbacks under controlled domains.
 
   # ─── Policy ──────────────────────────────────────────────────────────────
   - id: AGENTCORE-POLICY-001
-    title: No AgentCore Policy attached to Gateway exposing write-capable tools
+    title: Gateway exposing write-capable tools has no policyEngineConfiguration
     category: policy
     severity: high
     description: |
-      AgentCore Policy provides deterministic Cedar-based control intercepting
-      every tool call before execution. Without a Policy bound to a Gateway
-      that exposes write / execute / send / pay operations, tool-abuse
-      exploitation has no enforcement guardrail.
+      AgentCore Policy provides deterministic Cedar-based control
+      intercepting every tool call before execution. A Gateway exposing
+      write / execute / send / pay tools without a Policy attached has no
+      enforcement guardrail beyond Guardrail content filtering.
     client: bedrock-agentcore-control
-    operation: ListPolicyAttachments
-    field: gateway.policyAttachments
+    operation: get_gateway
+    field: policyEngineConfiguration.arn
     condition: |
-      at least one Policy must be attached for any Gateway whose tool targets
+      must be present (non-empty) for any Gateway whose tool targets
       include write/delete/execute/transfer/send/pay operations
+    boto3_verified: true
     atlas: [Tool-Abuse, Unsafe-Autonomy]
     compliance:
       - meti:統制リスク管理
@@ -300,69 +382,137 @@ checks:
       - nist-ai-rmf:MANAGE-2.1
       - iso-42001:8.2
     remediation: |
-      Author a Cedar policy permitting only the intended (principal, action,
-      resource) combinations for the agent's documented use cases, and attach
-      it to the Gateway.
-    verify: true
+      Author a Cedar policy permitting only intended (principal, action,
+      resource) combinations and attach it via policyEngineConfiguration.
 
   - id: AGENTCORE-POLICY-002
-    title: AgentCore Policy contains condition-less `permit` rule
+    title: Gateway policyEngineConfiguration.mode is LOG_ONLY in production
+    category: policy
+    severity: high
+    description: |
+      LOG_ONLY records what the policy WOULD have done but does not block
+      tool calls. Forgetting to switch to ENFORCE before going to production
+      is a silent posture regression.
+    client: bedrock-agentcore-control
+    operation: get_gateway
+    field: policyEngineConfiguration.mode
+    condition: must be ENFORCE in production (LOG_ONLY acceptable only in non-prod)
+    boto3_verified: true
+    atlas: [Tool-Abuse, Unsafe-Autonomy]
+    compliance:
+      - meti:統制リスク管理
+      - nist-ai-rmf:MANAGE-2.1
+    remediation: Switch policyEngineConfiguration.mode from LOG_ONLY to ENFORCE.
+
+  - id: AGENTCORE-POLICY-003
+    title: Cedar policy contains condition-less `permit` rule with wildcards
     category: policy
     severity: medium
     description: |
-      A Cedar rule of the form `permit(principal, action, resource);` with no
-      `when` / `unless` clauses effectively grants the agent every action on
-      every resource, defeating the purpose of attaching a Policy.
+      A Cedar rule of the form `permit(principal, action, resource);` with
+      no `when` / `unless` clauses effectively grants the agent every action
+      on every resource, defeating the purpose of attaching a Policy.
     client: bedrock-agentcore-control
-    operation: GetPolicy
-    field: policy.policyDocument
+    operation: get_policy
+    field: policyDocument
     condition: |
       no `permit` rule may be condition-less while also using wildcard
       principal / action / resource
+    boto3_verified: true
+    extra_logic: |
+      Requires a Cedar policy parser (cedar-policy upstream is Rust;
+      cedar-python bindings or in-house lexer needed).
     atlas: [Privilege-Escalation, Tool-Abuse]
     compliance:
       - meti:統制リスク管理
       - nist-ai-rmf:MANAGE-2.1
     remediation: Add `when` clauses constraining principal / action / resource to documented scope.
-    verify: true
 
-  # ─── Network ─────────────────────────────────────────────────────────────
-  - id: AGENTCORE-NETWORK-001
-    title: AgentCore Browser egress is unrestricted
-    category: network
+  # ─── Browser ─────────────────────────────────────────────────────────────
+  - id: AGENTCORE-BROWSER-001
+    title: AgentCore Browser uses PUBLIC networkMode (no VPC isolation)
+    category: browser
     severity: high
     description: |
-      AgentCore Browser that can reach arbitrary URLs is the textbook
-      indirect-PI vector: attacker-controlled web content reaches the
-      agent context.
+      get_browser does not expose a URL allowlist; egress restriction is
+      enforced via VPC + security groups. networkMode=PUBLIC means the
+      Browser can reach arbitrary internet URLs — the textbook indirect-PI
+      vector where attacker-controlled web content reaches agent context.
     client: bedrock-agentcore-control
-    operation: GetBrowser
-    field: browser.allowedDomains
-    condition: must be a non-empty allowlist (no `*`)
+    operation: get_browser
+    field: networkConfiguration.networkMode
+    condition: must be VPC with security-group egress rules restricting to allowed domains
+    boto3_verified: true
     atlas: [Indirect-Prompt-Injection]
     compliance:
       - meti:統制リスク管理
       - nist-ai-rmf:MEASURE-2.7
-    remediation: Configure a domain allowlist matching the agent's documented use cases.
-    verify: true
+    remediation: |
+      Set networkMode=VPC; constrain egress via security groups and a
+      DNS-resolution chokepoint to the agent's documented domain set.
 
-  - id: AGENTCORE-NETWORK-002
-    title: AgentCore Runtime endpoint exposed publicly without VPC endpoint
+  - id: AGENTCORE-BROWSER-002
+    title: AgentCore Browser recording is disabled
+    category: browser
+    severity: low
+    description: |
+      Browser session recording (to S3) is the only after-the-fact evidence
+      of what the agent saw and clicked. Without it, indirect-PI incidents
+      cannot be reproduced or attributed.
+    client: bedrock-agentcore-control
+    operation: get_browser
+    field: recording.enabled
+    condition: must be true for browsers handling sensitive or regulated workflows
+    boto3_verified: true
+    atlas: []
+    compliance:
+      - meti:統制リスク管理
+      - fsa:AI-DP-6
+      - iso-42001:9.1
+    remediation: Set recording.enabled=true and configure recording.s3Location with an audit-only bucket.
+
+  # ─── Code Interpreter ────────────────────────────────────────────────────
+  - id: AGENTCORE-CODE-INTERPRETER-001
+    title: AgentCore Code Interpreter uses PUBLIC networkMode
+    category: code-interpreter
+    severity: high
+    description: |
+      networkMode=PUBLIC gives the sandbox open internet egress. Indirect-PI
+      that lands in a code-execution context can exfiltrate data or pull
+      attacker payloads. SANDBOX or VPC modes restrict that.
+      (Note: there is no separate "approval" field on get_code_interpreter
+      — approval is an orchestration-layer concern, not a CI resource flag.)
+    client: bedrock-agentcore-control
+    operation: get_code_interpreter
+    field: networkConfiguration.networkMode
+    condition: must be SANDBOX or VPC (not PUBLIC)
+    boto3_verified: true
+    atlas: [Unsafe-Autonomy, Tool-Abuse]
+    compliance:
+      - meti:統制リスク管理
+      - fsa:AI-DP-5
+      - iso-42001:8.2
+    remediation: Set networkMode=SANDBOX (default isolation) or VPC for fully-controlled egress.
+
+  # ─── Network (AWS-network-layer checks) ──────────────────────────────────
+  - id: AGENTCORE-NETWORK-001
+    title: No VPC interface endpoint to bedrock-agentcore-runtime service
     category: network
     severity: medium
     description: |
-      Public AgentCore endpoints widen the attack surface for direct PI
-      and credential abuse. VPC endpoints + private DNS reduce exposure.
+      Even when AgentCore Runtime is in VPC mode, callers from within the
+      VPC need an interface endpoint to reach the service privately. Without
+      it, traffic egresses through a NAT / public path.
     client: ec2
-    operation: DescribeVpcEndpoints
+    operation: describe_vpc_endpoints
     field: VpcEndpoints[?ServiceName==`com.amazonaws.<region>.bedrock-agentcore-runtime`]
-    condition: must exist for the agent's region
+    condition: must exist for any VPC hosting agent callers
+    boto3_verified: true
     atlas: [Initial-Access]
     compliance:
       - fsa:AI-DP-4
       - meti:統制リスク管理
     remediation: Create an interface VPC endpoint for the AgentCore Runtime service.
-    verify: true
 
   # ─── Observability ───────────────────────────────────────────────────────
   - id: AGENTCORE-OBSERVABILITY-001
@@ -373,9 +523,10 @@ checks:
       Without data events, InvokeAgent calls and Action Group invocations
       are not auditable post-incident.
     client: cloudtrail
-    operation: GetEventSelectors
+    operation: get_event_selectors
     field: EventSelectors[*].DataResources[?Type=='AWS::Bedrock::AgentAlias']
     condition: must include AgentAlias resources
+    boto3_verified: true
     atlas: []
     compliance:
       - jp-appi:第23条 # 個人データの取扱いの委託先監督
@@ -385,16 +536,17 @@ checks:
     remediation: Enable CloudTrail data events for Bedrock AgentAlias resources.
 
   - id: AGENTCORE-OBSERVABILITY-002
-    title: AgentCore prompt / completion logs not encrypted
+    title: AgentCore prompt / completion logs not encrypted with CMK
     category: observability
     severity: medium
     description: |
       Trace logs often contain user prompts and tool arguments that may be
       sensitive. Default CloudWatch encryption (AWS-owned key) is opaque.
     client: logs
-    operation: DescribeLogGroups
-    field: logGroups[?logGroupName starts with /aws/bedrock/agentcore].kmsKeyId
+    operation: describe_log_groups
+    field: logGroups[?starts_with(logGroupName, `/aws/bedrock/agentcore`)].kmsKeyId
     condition: must be a customer-managed key ARN
+    boto3_verified: true
     atlas: [Sensitive-Information-Disclosure]
     compliance:
       - jp-appi:第23条
@@ -404,27 +556,32 @@ checks:
 
   # ─── Prompt Override ─────────────────────────────────────────────────────
   - id: AGENTCORE-PROMPT-OVERRIDE-001
-    title: Prompt Override removes or weakens security instructions
+    title: Prompt Override removes or weakens default safety instructions
     category: prompt-override
     severity: high
     description: |
-      Bedrock Agents allow overriding the orchestration / pre-processing
-      prompts. If the override removes safety-related instructions present
-      in the default template, security posture silently regresses.
+      Bedrock Agents allow overriding the orchestration / pre-processing /
+      knowledge-base-response-generation prompts. If the override removes
+      safety-related instructions present in the default template, security
+      posture silently regresses.
     client: bedrock-agent
-    operation: GetAgent
+    operation: get_agent
     field: agent.promptOverrideConfiguration.promptConfigurations[*].basePromptTemplate
     condition: |
-      override template must contain (or strengthen) safety-keyword classes
+      override template must preserve (or strengthen) safety-keyword classes
       from the default: refuse-unsafe, do-not-leak-system-prompt,
       do-not-exfiltrate, denied-topic-handling
+    boto3_verified: true
+    extra_logic: |
+      Maintain a per-promptType baseline of the default template and run a
+      semantic diff. v0.1: regex over safety-keyword classes; v0.2: LLM-judge.
     atlas: [LLM-Prompt-Injection]
     compliance:
       - meti:統制リスク管理
       - nist-ai-rmf:MANAGE-1.3
     remediation: |
-      Either disable Prompt Override or update the custom template to
-      preserve the safety-keyword classes. Track diffs against the default.
+      Disable Prompt Override or update the custom template to preserve the
+      safety-keyword classes. Track diffs against the default baseline.
 
   # ─── Knowledge Base ──────────────────────────────────────────────────────
   - id: AGENTCORE-KB-001
@@ -434,14 +591,18 @@ checks:
     description: |
       If the S3 source backing a Knowledge Base is writable by untrusted
       principals, an attacker can inject documents that will be retrieved
-      and fed into the agent context — indirect prompt injection at the
+      and fed into the agent context — indirect prompt injection at its
       most reliable vector.
     client: s3
-    operation: GetBucketPolicy / GetPublicAccessBlock
+    operation: get_bucket_policy / get_public_access_block
     field: PolicyDocument.Statement[*], PublicAccessBlockConfiguration
     condition: |
       bucket must block public access; bucket policy must not allow
       `s3:PutObject` to Principal `*` or to broadly-scoped roles
+    boto3_verified: true
+    extra_logic: |
+      S3 ARN obtained via:
+        bedrock-agent:get_data_source → dataSourceConfiguration.s3Configuration.bucketArn.
     atlas: [Indirect-Prompt-Injection]
     compliance:
       - jp-appi:第23条
@@ -450,3 +611,33 @@ checks:
     remediation: |
       Enable Block Public Access; restrict s3:PutObject to a specific
       ingest pipeline role; consider Object Lock for ingested documents.
+
+  # ─── Multi-agent ─────────────────────────────────────────────────────────
+  - id: AGENTCORE-MULTI-AGENT-001
+    title: Collaborator agents have inconsistent guardrails or auth
+    category: multi-agent
+    severity: high
+    description: |
+      In multi-agent collaboration, a sub-agent without a Guardrail or with
+      a weaker authorizer becomes the trust-boundary weak link: messages
+      laundered through it bypass the parent agent's controls.
+    client: bedrock-agent
+    operation: list_agent_collaborators / get_agent_collaborator
+    field: collaborators[*].agentDescriptor
+    condition: |
+      every collaborator must have: (1) a Guardrail attached, (2) an
+      authorizer at least as strong as the parent agent's
+    boto3_verified: true
+    extra_logic: |
+      For each collaborator agentId: chain to get_agent and compare
+      guardrailConfiguration + (if Runtime-deployed) authorizerConfiguration
+      against the parent agent's.
+    atlas: [Multi-Agent-Trust-Boundary]
+    compliance:
+      - meti:統制リスク管理
+      - nist-ai-rmf:MANAGE-1.3
+      - iso-42001:8.2
+    remediation: |
+      Standardize Guardrail and authorizer baselines across all collaborator
+      agents; enforce via account-level Enforced Guardrail Configuration
+      (see AGENTCORE-GUARDRAIL-004).

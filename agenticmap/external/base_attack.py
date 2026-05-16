@@ -1,16 +1,23 @@
 """BaseAttack — abstract attack module.
 
-Concrete attacks (direct PI, indirect PI, jailbreak, tool abuse, multi-agent
-chained) implement `run` and emit Findings into the KG.
+Mirrors PromptMap's `engine.base_attack.BaseAttack` so AgenticMap can
+host or import PromptMap attacks unchanged. Concrete AgenticMap-specific
+attacks (indirect PI via KB injection, tool-abuse for Action Groups,
+multi-agent chained) subclass this directly; PromptMap's 6 existing
+attacks (single PI, Crescendo, PAIR, TAP, Chunked Request, autonomous
+Agent) plug in by re-export once PromptMap is packaged.
+
+TODO: replace with `from promptmap.engine.base_attack import BaseAttack`
+when `promptmap-engine` is on PyPI.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
 
-from ..core.models import Finding
-from .target_adapter import TargetAdapter
+if TYPE_CHECKING:
+    from ..core.models import Finding
 
 
 class BaseAttack(ABC):
@@ -19,5 +26,13 @@ class BaseAttack(ABC):
     atlas_tags: list[str] = []
 
     @abstractmethod
-    def run(self, target: TargetAdapter) -> Iterable[Finding]:
-        """Run this attack against the target, yielding Findings."""
+    async def run(self, ctx: Any, objective: str, **kwargs: Any) -> "AttackResult":  # noqa: F821
+        """Run this attack with the given AttackContext and objective.
+
+        The PromptMap signature uses `AttackContext` (which carries the
+        target adapter, scorer, signatures, and session memory) and an
+        `objective` string. The return type is PromptMap's `AttackResult`;
+        the AgenticMap External Probe layer converts `AttackResult`
+        instances into `Finding` objects before inserting them into the
+        Findings KG (see `agenticmap/external/finding_adapter.py`, planned).
+        """

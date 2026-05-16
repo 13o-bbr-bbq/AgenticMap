@@ -23,20 +23,21 @@ Two top-level categories: **misconfigurations (static)** and **vulnerabilities (
 
 Static checks against AgentCore and legacy Bedrock Agents configuration, organized by feature name.
 
-| Target feature | Example misconfigurations |
+| Target feature | Example misconfigurations (with boto3 field names) |
 |---|---|
-| **AgentCore Runtime** | Inbound auth not configured (OAuth / Cognito missing), public endpoint without VPC endpoint |
-| **AgentCore Memory** | No TTL, customer-managed KMS key absent, PII auto-masking disabled |
-| **AgentCore Gateway** | Authorization type set to NONE (anonymous), tool targets sprawling across one agent |
-| **AgentCore Identity** | Workload identity over-privileged, wildcard resources permitted |
-| **AgentCore Policy** | No Policy applied to write-capable tools, broad Cedar `permit` rules without conditions, bypass paths around Gateway |
-| **AgentCore Browser** | No egress allowlist (arbitrary URL fetches) — direct path for indirect prompt injection |
-| **AgentCore Code Interpreter** | No approval flow, sandbox egress unrestricted |
-| **AgentCore Observability** | CloudTrail data events off, log groups unencrypted (no customer KMS), Application Signals / X-Ray not wired |
-| **Bedrock Agents: Guardrail** | Agent without a Guardrail, content / PII / prompt-attack filters off |
+| **AgentCore Runtime** | `authorizerConfiguration.customJWTAuthorizer` missing (no inbound auth), `networkConfiguration.networkMode=PUBLIC` (no VPC isolation) |
+| **AgentCore Memory** | `eventExpiryDuration` unset (indefinite retention), no customer-managed `encryptionKeyArn` (PII masking lives on the Guardrail side, not Memory) |
+| **AgentCore Gateway** | `authorizerType=NONE` (anonymous), tool-target sprawl, `exceptionLevel=DEBUG` (info disclosure) |
+| **AgentCore Identity** | Workload Identity `allowedResourceOauth2ReturnUrls` contains wildcards or external domains (open-redirect path) |
+| **AgentCore Policy** | Gateway has no `policyEngineConfiguration`, `mode=LOG_ONLY` left in production, Cedar policy with condition-less `permit` rules |
+| **AgentCore Browser** | `networkConfiguration.networkMode=PUBLIC` (no VPC isolation) — indirect PI surface via arbitrary URL fetches, `recording.enabled=false` (no post-incident trail) |
+| **AgentCore Code Interpreter** | `networkConfiguration.networkMode=PUBLIC` (SANDBOX or VPC not used) |
+| **AgentCore Observability** | CloudTrail data events off, log groups without customer-managed `kmsKeyId`, Application Signals / X-Ray not wired |
+| **Bedrock Agents: Guardrail** | Agent without a Guardrail, `PROMPT_ATTACK` filter / `piiEntities` disabled, no account-level enforced Guardrail configuration |
 | **Bedrock Agents: Action Group** | `requireConfirmation` unset (no HITL), Lambda execution role with `*` or `AdministratorAccess` |
 | **Bedrock Agents: Knowledge Base** | S3 source allows public access, broad write scope on the ingestion bucket |
 | **Bedrock Agents: Prompt Override** | Safety-relevant default instructions removed or weakened |
+| **Bedrock Agents: Collaborator (multi-agent)** | Sub-agent missing a Guardrail, or with a weaker authorizer than the parent agent |
 
 ### Vulnerabilities
 
