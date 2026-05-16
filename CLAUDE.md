@@ -20,17 +20,17 @@ Tagline:
 
 Split into two top-level categories.
 
-**Misconfigurations (static)** — keyed to AgentCore feature names so checks map 1:1 to the surface they audit:
+**Misconfigurations (static)** — keyed to AgentCore feature names; field paths verified against boto3 reference (2026-05). See [agenticmap/internal/bedrock/checks.yaml](agenticmap/internal/bedrock/checks.yaml) for the full catalog (currently 26 checks).
 
-- AgentCore Runtime — inbound auth, public exposure / VPC endpoint
-- AgentCore Memory — TTL, customer-managed KMS key, PII auto-masking
-- AgentCore Gateway — authorization type, tool-target sprawl
-- AgentCore Identity — workload identity scope (no wildcard resources)
-- AgentCore Policy — Cedar rule coverage on write-capable tools, no condition-less `permit` rules
-- AgentCore Browser — egress allowlist (no `*`)
-- AgentCore Code Interpreter — approval flow, sandbox egress
-- AgentCore Observability — CloudTrail data events, log encryption with CMK, Application Signals / X-Ray wiring
-- Bedrock Agents (legacy) — Guardrail attachment + filter strengths, Action Group `requireConfirmation`, Action Group Lambda role IAM scope, Knowledge Base S3 ACL, Prompt Override safety-instruction drift
+- AgentCore Runtime — `authorizerConfiguration.customJWTAuthorizer` present, `networkConfiguration.networkMode=VPC`
+- AgentCore Memory — `eventExpiryDuration` set, `encryptionKeyArn` is customer-managed (PII handling lives on Guardrail, not Memory)
+- AgentCore Gateway — `authorizerType` ≠ NONE, tool-target count within policy, `exceptionLevel` ≠ DEBUG
+- AgentCore Identity — Workload Identity `allowedResourceOauth2ReturnUrls` without wildcards / external domains (note: workload identity has no policy field — permissions are enforced via Runtime/Gateway `roleArn`)
+- AgentCore Policy — Gateway `policyEngineConfiguration.arn` present, `mode=ENFORCE` (not LOG_ONLY), Cedar policy without condition-less `permit` rules (requires Cedar parser)
+- AgentCore Browser — `networkConfiguration.networkMode=VPC` (no URL allowlist field exists; egress is restricted via VPC + SG), `recording.enabled=true` for forensics
+- AgentCore Code Interpreter — `networkConfiguration.networkMode` is SANDBOX or VPC (not PUBLIC); approval is an orchestration-layer concern, not a CI resource flag
+- AgentCore Observability — CloudTrail data events on `AWS::Bedrock::AgentAlias`, log groups encrypted with customer-managed `kmsKeyId`
+- Bedrock Agents (legacy) — Guardrail attachment, `PROMPT_ATTACK` filter + `piiEntities` enabled, account-level enforced Guardrail configuration set, Action Group `requireConfirmation` on high-impact functions, Action Group Lambda role IAM scope, Knowledge Base S3 source ACL, Prompt Override safety-instruction drift, collaborator agents share consistent Guardrail / authorizer baselines
 
 **Vulnerabilities (dynamic)** — confirmed by black-box probing of the agent endpoint:
 

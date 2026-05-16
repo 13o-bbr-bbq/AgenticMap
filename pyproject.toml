@@ -44,6 +44,10 @@ all = [
     "boto3>=1.34",
     "ollama>=0.3",
 ]
+# TODO v0.2: add a Cedar policy parser dependency for AGENTCORE-POLICY-003
+# (Cedar policy condition-less `permit` detection). Candidates: cedarpy or an
+# in-house lexer; AWS upstream Cedar is Rust. To be decided when implementing
+# the policy module under agenticmap/internal/bedrock/policy.py.
 
 [project.scripts]
 agenticmap = "agenticmap.cli:app"
